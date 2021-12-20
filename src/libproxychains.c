@@ -105,25 +105,12 @@ static void* load_sym(char* symname, void* proxyfunc) {
 
 #define INIT() init_lib_wrapper(__FUNCTION__)
 
-#define SETUP_SYM(X) do { if (! true_ ## X ) true_ ## X = load_sym( # X, X ); } while(0)
 
 #include "allocator_thread.h"
 
 const char *proxychains_get_version(void);
 
-static void setup_hooks(void) {
-	SETUP_SYM(connect);
-	SETUP_SYM(sendto);
-	SETUP_SYM(gethostbyname);
-	SETUP_SYM(getaddrinfo);
-	SETUP_SYM(freeaddrinfo);
-	SETUP_SYM(gethostbyaddr);
-	SETUP_SYM(getnameinfo);
-#ifdef IS_SOLARIS
-	SETUP_SYM(__xnet_connect);
-#endif
-	SETUP_SYM(close);
-}
+static void setup_hooks(void);
 
 static int close_fds[16];
 static int close_fds_cnt = 0;
@@ -579,7 +566,14 @@ inv_host:
 
 /*******  HOOK FUNCTIONS  *******/
 
-int close(int fd) {
+#define EXPAND( args...) args
+#ifdef MONTEREY_HOOKING
+#define HOOKFUNC(R, N, args...) R pxcng_ ## N ( EXPAND(args) )
+#else
+#define HOOKFUNC(R, N, args...) R N ( EXPAND(args) )
+#endif
+
+HOOKFUNC(int, close, int fd) {
 	if(!init_l) {
 		if(close_fds_cnt>=(sizeof close_fds/sizeof close_fds[0])) goto err;
 		close_fds[close_fds_cnt++] = fd;
@@ -600,7 +594,8 @@ int close(int fd) {
 static int is_v4inv6(const struct in6_addr *a) {
 	return !memcmp(a->s6_addr, "\0\0\0\0\0\0\0\0\0\0\xff\xff", 12);
 }
-int connect(int sock, const struct sockaddr *addr, unsigned int len) {
+
+HOOKFUNC(int, connect, int sock, const struct sockaddr *addr, unsigned int len) {
 	INIT();
 	PFUNC();
 
@@ -691,13 +686,13 @@ int connect(int sock, const struct sockaddr *addr, unsigned int len) {
 }
 
 #ifdef IS_SOLARIS
-int __xnet_connect(int sock, const struct sockaddr *addr, unsigned int len) {
+HOOKFUNC(int, __xnet_connect, int sock, const struct sockaddr *addr, unsigned int len)
 	return connect(sock, addr, len);
 }
 #endif
 
 static struct gethostbyname_data ghbndata;
-struct hostent *gethostbyname(const char *name) {
+HOOKFUNC(struct hostent*, gethostbyname, const char *name) {
 	INIT();
 	PDEBUG("gethostbyname: %s\n", name);
 
@@ -711,7 +706,7 @@ struct hostent *gethostbyname(const char *name) {
 	return NULL;
 }
 
-int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
+HOOKFUNC(int, getaddrinfo, const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
 	INIT();
 	PDEBUG("getaddrinfo: %s %s\n", node ? node : "null", service ? service : "null");
 
@@ -721,7 +716,7 @@ int getaddrinfo(const char *node, const char *service, const struct addrinfo *hi
 		return true_getaddrinfo(node, service, hints, res);
 }
 
-void freeaddrinfo(struct addrinfo *res) {
+HOOKFUNC(void, freeaddrinfo, struct addrinfo *res) {
 	INIT();
 	PDEBUG("freeaddrinfo %p \n", (void *) res);
 
@@ -731,7 +726,7 @@ void freeaddrinfo(struct addrinfo *res) {
 		proxy_freeaddrinfo(res);
 }
 
-int pc_getnameinfo(const struct sockaddr *sa, socklen_t salen,
+HOOKFUNC(int, getnameinfo, const struct sockaddr *sa, socklen_t salen,
 	           char *host, socklen_t hostlen, char *serv,
 	           socklen_t servlen, int flags)
 {
@@ -775,7 +770,7 @@ int pc_getnameinfo(const struct sockaddr *sa, socklen_t salen,
 	return 0;
 }
 
-struct hostent *gethostbyaddr(const void *addr, socklen_t len, int type) {
+HOOKFUNC(struct hostent*, gethostbyaddr, const void *addr, socklen_t len, int type) {
 	INIT();
 	PDEBUG("TODO: proper gethostbyaddr hook\n");
 
@@ -811,7 +806,7 @@ struct hostent *gethostbyaddr(const void *addr, socklen_t len, int type) {
 #   define MSG_FASTOPEN 0x20000000
 #endif
 
-ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
+HOOKFUNC(ssize_t, sendto, int sockfd, const void *buf, size_t len, int flags,
 	       const struct sockaddr *dest_addr, socklen_t addrlen) {
 	INIT();
 	PFUNC();
@@ -825,3 +820,41 @@ ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
 	}
 	return true_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
 }
+
+#ifdef MONTEREY_HOOKING
+#define SETUP_SYM(X) do { if (! true_ ## X ) true_ ## X = &X; } while(0)
+#else
+#define SETUP_SYM(X) do { if (! true_ ## X ) true_ ## X = load_sym( # X, X ); } while(0)
+#endif
+
+static void setup_hooks(void) {
+	SETUP_SYM(connect);
+	SETUP_SYM(sendto);
+	SETUP_SYM(gethostbyname);
+	SETUP_SYM(getaddrinfo);
+	SETUP_SYM(freeaddrinfo);
+	SETUP_SYM(gethostbyaddr);
+	SETUP_SYM(getnameinfo);
+#ifdef IS_SOLARIS
+	SETUP_SYM(__xnet_connect);
+#endif
+	SETUP_SYM(close);
+}
+
+#ifdef MONTEREY_HOOKING
+
+#define DYLD_INTERPOSE(_replacement,_replacee) \
+   __attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_##_replacee \
+   __attribute__((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
+#define DYLD_HOOK(F) DYLD_INTERPOSE(pxcng_ ## F, F)
+
+DYLD_HOOK(connect);
+DYLD_HOOK(sendto);
+DYLD_HOOK(gethostbyname);
+DYLD_HOOK(getaddrinfo);
+DYLD_HOOK(freeaddrinfo);
+DYLD_HOOK(gethostbyaddr);
+DYLD_HOOK(getnameinfo);
+DYLD_HOOK(close);
+
+#endif
